@@ -33,7 +33,7 @@ def main():
     parser.add_argument('-d', '--debug', action='store_true', help='Verbose Mode')
     parser.add_argument('-f', '--file',  nargs='+', help='Input filename')
     parser.add_argument('-c', '--csv', action='store_true', help='Enable csv generation')
-#    parser.add_argument('-a', '--audio', action='store_true', help='Enable audio generation')
+    parser.add_argument('-r', '--reverse', action='store_true', help='Do reverse translation')
     parser.add_argument('-v', '--video', action='store_true', help='Enable video generation')
     parser.add_argument('-s', '--source_language', help='source language present in the input file(s), jp or de')
 
@@ -78,6 +78,9 @@ def get_comma_count(csv_file: str):
         first_line_comma_count = first_line.count(',')
     return first_line_comma_count    
 
+def reverse_pairs_in_list(list_to_reverse: list):
+    return [(pair[1], pair[0]) for pair in list_to_reverse]
+
 def run_general_translation_from_csv(csv_data: str, args, input_filename, source_voice: str, target_voice: str):
     # Split the CSV data into rows
     rows = csv_data.strip().split('\n')
@@ -99,7 +102,13 @@ def run_general_translation_from_csv(csv_data: str, args, input_filename, source
    #     generate_audio(source_to_target_list, input_filename_without_extension)    
 
     if args.video is True:
-        generate_video(source_to_target_list, input_filename_without_extension, source_voice, target_voice)
+        if args.reverse is True:
+            target_to_source_list = reverse_pairs_in_list(source_to_target_list)
+            input_filename_without_extension = input_filename_without_extension + "_reversed"
+            print(f"Reversed the source to target list")
+            generate_video_v2(target_to_source_list, input_filename_without_extension, target_voice, source_voice)
+        else:
+            generate_video_v2(source_to_target_list, input_filename_without_extension, source_voice, target_voice)
 
 
 def run_japanese_translation_from_csv(csv_data: str, args, input_filename):
@@ -140,6 +149,7 @@ def text_to_wav(text: str, language_code: str, voice_name: str):
         language_code=language_code, name=voice_name
     )
     client = tts.TextToSpeechClient()
+    print(f"running text to speech for {text}")
     response = client.synthesize_speech(
         input=text_input,
         voice=voice_params,
@@ -198,6 +208,12 @@ def generate_image(text: str):
     output_filename = "text_image.png"  # Specify the output filename
     image.save(output_filename)
 
+def generate_input_file_to_ffmpeg_v2(list_length, num_intermediate_files):
+    with open("temp/ffmpeg_list", "wb") as out: 
+        for index in range(list_length):
+            for intermediate_file_index in range(num_intermediate_files):
+                out.write(f"file 'output_{index}_{intermediate_file_index}.mp4'\n".encode())
+
 def generate_input_file_to_ffmpeg_for_jap(list_length):
     with open("temp/ffmpeg_list", "wb") as out: 
         for index in range(list_length):
@@ -210,6 +226,36 @@ def generate_input_file_to_ffmpeg(list_length):
         for index in range(list_length):
             out.write(f"file 'output_{index}.mp4'\n".encode())
 
+def generate_silence_audio_clip(
+        
+):
+    silence_audio_clip = AudioFileClip("temp/silence.m4a")    
+    print(f"silence audio duration {silence_audio_clip.duration}")
+    return silence_audio_clip
+    
+def generate_buffer_audio_clip(
+        
+):
+    silence_audio_clip = AudioFileClip("temp/buffer.m4a")    
+    print(f"buffer audio duration {silence_audio_clip.duration}")
+    return silence_audio_clip    
+
+def generate_word_audio_clip(
+        text: str,
+        voice: str
+):
+    voice_language_code = "-".join(voice.split("-")[:2])
+    audio = text_to_wav(text, voice_language_code, voice)
+    with open("temp/temp_audio.wav", "wb") as out:
+        out.write(audio.audio_content)
+        out.close()
+
+    audio_clip = AudioFileClip("temp/temp_audio.wav")
+    print(f"audio clip duration {audio_clip.duration}")
+    return audio_clip
+
+    # return AudioFileClip("temp/temp_audio.wav")
+    # return audio_clip.set_duration(audio_clip.duration + 1)
 
 def generate_word_and_translation_sequenced_audio_clip(
         jap_text: str, 
@@ -314,6 +360,60 @@ def generate_japanese_video(kana_to_english_result_list: list, kanji_to_kana_res
     generate_input_file_to_ffmpeg_for_jap(len(kana_to_english_result_list))
     run_ffmpeg_command(ouput_file_name_without_extension)
 
+
+def generate_video_v2(source_to_target_list: list, ouput_file_name_without_extension: str, source_voice: str, target_voice: str): 
+    ix = 0
+
+    for item in source_to_target_list:
+
+        source_text = item[0]
+        target_text = item[1]
+
+        print(f"Generating video for {source_text}")
+
+        source_audio = generate_word_audio_clip(source_text, source_voice)
+        source_txt_clip = generate_text_clip(source_text, source_audio.duration)
+
+        silence_audio_prefix = generate_silence_audio_clip()
+        silence_txt_clip_prefix = generate_text_clip(" ", silence_audio_prefix.duration)
+        silence_audio_middle = generate_silence_audio_clip()        
+        silence_txt_clip_middle = generate_text_clip(" ", silence_audio_middle.duration)  
+
+        middle_buffer_audio = generate_buffer_audio_clip()
+        middle_buffer_txt_clip = generate_text_clip(source_text, middle_buffer_audio.duration)
+
+        suffix_buffer_audio = generate_buffer_audio_clip()
+        suffix_buffer_txt_clip = generate_text_clip(target_text, suffix_buffer_audio.duration)
+
+        target_audio = generate_word_audio_clip(target_text, target_voice)
+        target_txt_clip = generate_text_clip(target_text, target_audio.duration)
+
+        # Combine the text and audio clips into a single video track
+        
+        prefix_video = CompositeVideoClip([silence_txt_clip_prefix.set_audio(silence_audio_prefix)])
+        prefix_video.write_videofile(f"temp/output_{ix}_0.mp4", fps=25)    
+
+        source_video = CompositeVideoClip([source_txt_clip.set_audio(source_audio)])
+        source_video.write_videofile(f"temp/output_{ix}_1.mp4", fps=25)    
+
+        middle_buffer_video = CompositeVideoClip([middle_buffer_txt_clip.set_audio(middle_buffer_audio)])
+        middle_buffer_video.write_videofile(f"temp/output_{ix}_2.mp4", fps=25)        
+
+        middle_video = CompositeVideoClip([silence_txt_clip_middle.set_audio(silence_audio_middle)])
+        middle_video.write_videofile(f"temp/output_{ix}_3.mp4", fps=25)    
+
+        target_video = CompositeVideoClip([target_txt_clip.set_audio(target_audio)])
+        target_video.write_videofile(f"temp/output_{ix}_4.mp4", fps=25)            
+
+        suffix_buffer_video = CompositeVideoClip([suffix_buffer_txt_clip.set_audio(suffix_buffer_audio)])
+        suffix_buffer_video.write_videofile(f"temp/output_{ix}_5.mp4", fps=25)            
+
+        print(f"Done with video for {source_text}")
+
+        ix = ix + 1    
+
+    generate_input_file_to_ffmpeg_v2(len(source_to_target_list), 6)
+    run_ffmpeg_command(ouput_file_name_without_extension)
 
 def generate_video(source_to_target_list: list, ouput_file_name_without_extension: str, source_voice: str, target_voice: str): 
     ix = 0
